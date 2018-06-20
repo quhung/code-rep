@@ -1,0 +1,234 @@
+
+import android.support.annotation.NonNull;
+
+import com.dcash.wallet.service.wallet.Transaction;
+
+import org.jetbrains.annotations.NotNull;
+import org.web3j.abi.FunctionEncoder;
+import org.web3j.abi.TypeReference;
+import org.web3j.abi.datatypes.Address;
+import org.web3j.abi.datatypes.Function;
+import org.web3j.abi.datatypes.Type;
+import org.web3j.abi.datatypes.generated.Uint256;
+import org.web3j.crypto.Credentials;
+import org.web3j.crypto.RawTransaction;
+import org.web3j.crypto.TransactionEncoder;
+import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.DefaultBlockParameterName;
+import org.web3j.protocol.core.methods.response.EthGasPrice;
+import org.web3j.protocol.core.methods.response.EthGetTransactionCount;
+import org.web3j.protocol.core.methods.response.EthGetTransactionReceipt;
+import org.web3j.protocol.core.methods.response.EthSendTransaction;
+import org.web3j.protocol.core.methods.response.TransactionReceipt;
+import org.web3j.tx.Contract;
+import org.web3j.tx.ManagedTransaction;
+import org.web3j.tx.RawTransactionManager;
+import org.web3j.tx.Transfer;
+import org.web3j.utils.Convert;
+import org.web3j.utils.Numeric;
+
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.util.Arrays;
+import java.util.Collections;
+
+import static junit.framework.Assert.assertFalse;
+import static junit.framework.Assert.fail;
+
+class RawTransactionIT {
+    private static final BigInteger GAS_LIMIT = BigInteger.valueOf(21000);
+    private static final int SLEEP_DURATION = 15000;
+    private static final int ATTEMPTS = 40;
+
+    private static RawTransaction createEtherTransaction(Web3j web3j, String number,
+                                                         BigInteger nonce,
+                                                         String toAddress) throws IOException {
+        return createEtherTransaction(number, nonce, toAddress, requestCurrentGasPrice(web3j), GAS_LIMIT);
+    }
+
+    private static RawTransaction createEtherTransaction(String number,
+                                                         BigInteger nonce,
+                                                         String toAddress, BigInteger gasLimit, BigInteger gasPrice) throws IOException {
+        BigInteger value = Convert.toWei(number, Convert.Unit.ETHER).toBigInteger();
+
+        return RawTransaction.createEtherTransaction(
+                nonce, gasPrice, gasLimit, toAddress, value);
+    }
+
+    /**
+     * Return the current gas price from the ethereum node.
+     * <p>
+     * Note: this method was previously called {@code getGasPrice} but was renamed to
+     * distinguish it when a bean accessor method on {@link Contract} was added with that name.
+     * If you have a Contract subclass that is calling this method (unlikely since those
+     * classes are usually generated and until very recently those generated subclasses were
+     * marked {@code final}), then you will need to change your code to call this method
+     * instead, if you want the dynamic behavior.
+     * </p>
+     *
+     * @return the current gas price, determined dynamically at invocation
+     * @throws IOException if there's a problem communicating with the ethereum node
+     */
+    private static BigInteger requestCurrentGasPrice(Web3j web3j) throws IOException {
+        EthGasPrice ethGasPrice = web3j.ethGasPrice().send();
+
+        return ethGasPrice.getGasPrice();
+    }
+
+    public static TransactionReceipt etherTransferImplByOurSelves(@NonNull Web3j web3j,
+                                                                  @NonNull Credentials from,
+                                                                  @NonNull String toAddress,
+                                                                  @NonNull String number) throws Exception {
+        BigInteger nonce = getNonce(web3j, from.getAddress());
+        RawTransaction rawTransaction = createEtherTransaction(web3j, number,
+                nonce, toAddress);
+
+        byte[] signedMessage = TransactionEncoder.signMessage(rawTransaction, from);
+        String hexValue = Numeric.toHexString(signedMessage);
+
+        EthSendTransaction ethSendTransaction =
+                web3j.ethSendRawTransaction(hexValue).sendAsync().get();
+        String transactionHash = ethSendTransaction.getTransactionHash();
+
+        assertFalse(transactionHash.isEmpty());
+
+        return waitForTransactionReceipt(web3j, transactionHash);
+    }
+
+    public static TransactionReceipt etherTransferImplByOurSelves(@NotNull Web3j web3j,
+                                                                  @NotNull Credentials from,
+                                                                  @NotNull String to,
+                                                                  @NotNull String gasLimit,
+                                                                  @NotNull String gasPrice,
+                                                                  @NotNull String amount,
+                                                                  @NotNull BigInteger nonce) throws Exception {
+        RawTransaction rawTransaction = createEtherTransaction(amount,
+                nonce, to, Numeric.toBigInt(gasLimit), Numeric.toBigInt(gasPrice));
+        byte[] signedMessage = TransactionEncoder.signMessage(rawTransaction, from);
+        String hexValue = Numeric.toHexString(signedMessage);
+        EthSendTransaction ethSendTransaction =
+                web3j.ethSendRawTransaction(hexValue).sendAsync().get();
+        String transactionHash = ethSendTransaction.getTransactionHash();
+        return waitForTransactionReceipt(web3j, transactionHash);
+    }
+
+
+    public static TransactionReceipt etherTransfer(@NonNull Web3j web3j,
+                                                   @NonNull Credentials from,
+                                                   @NonNull String toAddress,
+                                                   @NonNull String number) throws Exception {
+        return Transfer.sendFunds(
+                web3j, from, toAddress,
+                BigDecimal.valueOf(Double.parseDouble(number)),
+                Convert.Unit.ETHER).send();
+    }
+
+    private static TransactionReceipt waitForTransactionReceipt(
+            Web3j web3j, String transactionHash) throws Exception {
+
+        TransactionReceipt transactionReceipt =
+                getTransactionReceipt(web3j, transactionHash, SLEEP_DURATION, ATTEMPTS);
+
+        if (transactionReceipt == null) {
+            fail("Transaction receipt not generated after " + ATTEMPTS + " attempts");
+        }
+
+        return transactionReceipt;
+    }
+
+    private static TransactionReceipt getTransactionReceipt(Web3j web3j,
+                                                            String transactionHash,
+                                                            int sleepDuration,
+                                                            int attempts) throws Exception {
+
+        TransactionReceipt receiptOptional =
+                sendTransactionReceiptRequest(web3j, transactionHash);
+        for (int i = 0; i < attempts; i++) {
+            if (receiptOptional == null) {
+                Thread.sleep(sleepDuration);
+                receiptOptional = sendTransactionReceiptRequest(web3j, transactionHash);
+            } else {
+                break;
+            }
+        }
+        return receiptOptional;
+    }
+
+    static BigInteger getNonce(Web3j web3j, String address) throws Exception {
+        EthGetTransactionCount ethGetTransactionCount = web3j.ethGetTransactionCount(
+                address, DefaultBlockParameterName.LATEST).sendAsync().get();
+
+        return ethGetTransactionCount.getTransactionCount();
+    }
+
+    private static TransactionReceipt sendTransactionReceiptRequest(Web3j web3j,
+                                                                    String transactionHash) throws Exception {
+        EthGetTransactionReceipt transactionReceipt =
+                web3j.ethGetTransactionReceipt(transactionHash).send();
+        return transactionReceipt.getTransactionReceipt();
+    }
+
+    @NotNull
+    public static EthSendTransaction tokenTransfer(Web3j web3j,
+                                                   Credentials credentials,
+                                                   String contractAddress,
+                                                   String friendAddress,
+                                                   String value) throws IOException {
+        Function function = new Function(
+                "transfer",
+                Arrays.<Type>asList(new Address(friendAddress),
+                        new Uint256(new BigInteger(value))),
+                Collections.<TypeReference<?>>emptyList());
+        String encodedFunction = FunctionEncoder.encode(function);
+
+        RawTransactionManager txManager = new RawTransactionManager(web3j, credentials);
+
+        return txManager.sendTransaction(
+                ManagedTransaction.GAS_PRICE, Contract.GAS_LIMIT,
+                contractAddress, encodedFunction, BigInteger.ZERO);
+    }
+
+
+    @NotNull
+    public static Transaction tokenTransfer(@NotNull Web3j web3j,
+                                            @NotNull Credentials credentials,
+                                            @NotNull String contract,
+                                            @NotNull String to,
+                                            @NotNull String amount,
+                                            @NotNull String gasLimit,
+                                            @NotNull String gasPrice,
+                                            long nonceString) throws IOException {
+
+        Function function = new Function(
+                "transfer",
+                Arrays.<Type>asList(new Address(to),
+                        new Uint256(new BigInteger(amount))),
+                Collections.<TypeReference<?>>emptyList());
+        String encodedFunction = FunctionEncoder.encode(function);
+
+        TokenRawTransaction txManager = new TokenRawTransaction(web3j, credentials);
+        BigInteger nonce = BigInteger.valueOf(nonceString);
+        if (nonceString <= -1) {
+            nonce = txManager.getNonce();
+        }
+
+        EthSendTransaction ethSendTransaction = txManager.sendTransaction(
+                Numeric.toBigInt(gasPrice),
+                Numeric.toBigInt(gasLimit),
+                contract,
+                encodedFunction,
+                BigInteger.ZERO,
+                nonce);
+        Transaction transaction = new Transaction();
+        transaction.transactionHash = ethSendTransaction.getTransactionHash();
+        transaction.nonce = nonce;
+        transaction.contract = contract;
+        transaction.from = credentials.getAddress();
+        transaction.to = to;
+        transaction.amount = new BigInteger(amount);
+        transaction.gasLimit = Numeric.toBigInt(gasLimit);
+        transaction.gasPrice = Numeric.toBigInt(gasPrice);
+        return transaction;
+    }
+}
